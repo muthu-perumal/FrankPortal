@@ -2,28 +2,69 @@ import { BrandMark } from './BrandMark'
 
 export default function LoadingPage({ title = 'Loading', subtitle = 'Please wait…' }) {
   return (
-    <div className="min-h-screen">
-      <div className="mx-auto w-full max-w-5xl px-5 pt-8">
-        <div className="rounded-2xl bg-white/80 px-6 py-4 shadow-[0_14px_40px_rgba(15,23,42,0.08)] ring-1 ring-slate-900/5 backdrop-blur">
-          <div className="flex items-center justify-between">
+    <div className="fp-loading-bg fp-vignette grid min-h-screen place-items-center px-6">
+      <div className="w-full max-w-3xl rounded-2xl bg-black/30 p-10 ring-1 ring-white/10 backdrop-blur-sm">
+        <div className="flex items-center justify-between">
+          <div className="opacity-90">
             <BrandMark />
-            <div className="text-xs font-semibold text-slate-500">Working…</div>
           </div>
+          <div className="text-xs font-semibold text-slate-300/80">Loading…</div>
         </div>
 
-        <div className="mx-auto mt-16 max-w-xl rounded-2xl bg-white/90 p-8 shadow-[0_22px_60px_rgba(15,23,42,0.12)] ring-1 ring-slate-900/5">
-          <div className="text-lg font-extrabold tracking-tight text-slate-900">
-            {title}
-          </div>
-          <div className="mt-2 text-sm text-slate-500">{subtitle}</div>
+        <div className="mt-12 grid place-items-center">
+          {/* Neon “home” loader (animated stroke + glow) */}
+          <svg
+            viewBox="0 0 220 140"
+            className="h-36 w-72"
+            aria-hidden="true"
+          >
+            <defs>
+              <linearGradient id="fpNeon" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stopColor="#60a5fa" />
+                <stop offset="50%" stopColor="#a78bfa" />
+                <stop offset="100%" stopColor="#3b82f6" />
+              </linearGradient>
+            </defs>
 
-          <div className="mt-6 fp-progress-track">
-            <div className="fp-progress-bar" />
-          </div>
+            {/* soft background glow */}
+            <path
+              d="M52 64 110 20l58 44v56a10 10 0 0 1-10 10H62a10 10 0 0 1-10-10V64Z"
+              fill="none"
+              stroke="rgba(59,130,246,0.22)"
+              strokeWidth="10"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="fp-neon-glow"
+              opacity="0.5"
+            />
 
-          <div className="mt-5 flex items-center gap-2 text-xs text-slate-500">
-            <span className="inline-flex h-2 w-2 animate-pulse rounded-full bg-blue-600/70" />
-            Preparing your next step…
+            {/* main outline */}
+            <path
+              d="M52 64 110 20l58 44v56a10 10 0 0 1-10 10H62a10 10 0 0 1-10-10V64Z"
+              fill="none"
+              stroke="url(#fpNeon)"
+              strokeWidth="6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="fp-neon-stroke fp-neon-glow"
+            />
+
+            {/* door */}
+            <path
+              d="M96 130V94a8 8 0 0 1 8-8h12a8 8 0 0 1 8 8v36"
+              fill="none"
+              stroke="url(#fpNeon)"
+              strokeWidth="5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="fp-neon-stroke fp-neon-glow"
+              style={{ animationDelay: '0.1s' }}
+            />
+          </svg>
+
+          <div className="mt-6 text-center">
+            <div className="text-sm font-semibold text-slate-200">{title}…</div>
+            <div className="mt-1 text-xs text-slate-400/80">{subtitle}</div>
           </div>
         </div>
       </div>
