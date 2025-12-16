@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { isAuthed } from './auth'
 import HomePage from './pages/HomePage'
 import LoginPage from './pages/LoginPage'
+import ApplicationFormPage from './pages/ApplicationFormPage'
 
 function ProtectedRoute({ children }) {
   if (!isAuthed()) return <Navigate to="/" replace />
@@ -17,6 +18,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <HomePage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/application/new"
+        element={
+          <ProtectedRoute>
+            <ApplicationFormPage />
           </ProtectedRoute>
         }
       />

@@ -207,6 +207,7 @@ function Hero() {
 }
 
 function PrimaryCard() {
+  const navigate = useNavigate()
   return (
     <div className="mx-auto mt-10 w-full max-w-5xl px-5">
       <div className="relative overflow-hidden rounded-2xl bg-white/90 shadow-[0_22px_60px_rgba(15,23,42,0.12)] ring-1 ring-slate-900/5">
@@ -222,7 +223,11 @@ function PrimaryCard() {
             </p>
 
             <div className="mt-6 flex flex-wrap items-center gap-4">
-              <button className="inline-flex items-center justify-center gap-2 rounded-xl bg-amber-400 px-5 py-3 text-sm font-semibold text-slate-900 shadow-[0_12px_24px_rgba(245,158,11,0.35)] transition hover:bg-amber-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">
+              <button
+                type="button"
+                onClick={() => navigate('/application/new')}
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-amber-400 px-5 py-3 text-sm font-semibold text-slate-900 shadow-[0_12px_24px_rgba(245,158,11,0.35)] transition hover:bg-amber-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+              >
                 <PlusIcon className="h-4 w-4" />
                 Start New Application
               </button>
