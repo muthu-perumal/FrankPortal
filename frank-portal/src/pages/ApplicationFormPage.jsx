@@ -704,6 +704,7 @@ export default function ApplicationFormPage() {
   const [animDirection, setAnimDirection] = useState(0)
   const [stepErrors, setStepErrors] = useState({})
   const [loading, setLoading] = useState(false)
+  const [userDefaultsSeed, setUserDefaultsSeed] = useState(0)
 
   const [secureControls, setSecureControls] = useState([])
   const parentComponentChangeEvents = useRef({})
@@ -1047,18 +1048,60 @@ export default function ApplicationFormPage() {
   }
 
   // Defaults from field settings (subset of your logic)
+  const pad2 = (n) => String(n).padStart(2, '0')
+  const formatDateYMD = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+  const formatTime12 = (d) => {
+    const hh24 = d.getHours()
+    const mm = pad2(d.getMinutes())
+    const ampm = hh24 >= 12 ? 'pm' : 'am'
+    const hh12 = hh24 % 12 || 12
+    return `${pad2(hh12)}:${mm} ${ampm}`
+  }
+
+  const getAutoGenerateValue = (field) => {
+    // Placeholder for your backend-specific auto-generate logic.
+    // Safe deterministic-ish default for demo:
+    return `AUTO_${String(field?.id || 'FIELD')}_${Date.now()}`
+  }
+
   const getInputDefaultValues = (field) => {
     const specific = field?.settings?.specific ?? {}
-    if (
-      specific.customDefaultValue !== undefined &&
-      specific.customDefaultValue !== null &&
-      specific.customDefaultValue !== ''
-    ) {
+
+    // 1) customDefaultValue (match your production behavior)
+    if (specific.customDefaultValue != null && specific.customDefaultValue !== '') {
+      const type = String(field?.type || '').toUpperCase()
+      if (type === 'PHONE_NUMBER') return ''
+      if (type === 'CURRENCY_AMOUNT') return ''
       return specific.customDefaultValue?.toString?.() ?? String(specific.customDefaultValue)
     }
-    if (specific.defaultValue === 'CURRENT_DATE') return new Date().toISOString().slice(0, 10)
-    if (specific.defaultValue === 'CURRENT_TIME') return new Date().toISOString().slice(11, 16)
-    if (specific.defaultValue === 'CURRENT_DATE_TIME') return new Date().toISOString()
+
+    // 2) named defaults (USER_NAME/USER_EMAIL/etc)
+    let user = null
+    try {
+      const raw = sessionStorage.getItem('userDetails')
+      user = raw ? JSON.parse(raw) : null
+    } catch {
+      user = null
+    }
+
+    if (specific.defaultValue === 'USER_NAME') {
+      const first = String(user?.firstName || '').trim()
+      const last = String(user?.lastName || '').trim()
+      return `${first} ${last}`.trim() || null
+    }
+    if (specific.defaultValue === 'USER_EMAIL') {
+      return user?.email ? String(user.email).trim() : null
+    }
+
+    // 3) date/time defaults (moment-free)
+    const now = new Date()
+    if (specific.defaultValue === 'CURRENT_DATE') return formatDateYMD(now)
+    if (specific.defaultValue === 'CURRENT_TIME') return formatTime12(now) // "hh:mm a"
+    if (specific.defaultValue === 'CURRENT_DATE_TIME') return `${formatDateYMD(now)} ${formatTime12(now)}`
+
+    // 4) auto-generate
+    if (specific.defaultValue === 'AUTO_GENERATE') return getAutoGenerateValue(field)
+
     return null
   }
 
@@ -1071,7 +1114,7 @@ export default function ApplicationFormPage() {
     })
     if (Object.keys(defaults).length) setValuesById((p) => ({ ...defaults, ...p }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allFields.length])
+  }, [allFields.length, userDefaultsSeed])
 
   // Load existing values if tid/pid exist
   useEffect(() => {
@@ -1104,6 +1147,7 @@ export default function ApplicationFormPage() {
           } catch {
             userData.current = null
           }
+          setUserDefaultsSeed((s) => s + 1)
 
           const currentUserEmail = userData.current?.email
           const raisedByEmail = inboxData?.raisedBy
