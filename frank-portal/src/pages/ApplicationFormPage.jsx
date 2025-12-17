@@ -7,6 +7,12 @@ import SearchableSelect from '../components/form/SearchableSelect'
 import LookupTextInput from '../components/form/LookupTextInput'
 import EmailInviteInput from '../components/form/EmailInviteInput'
 import JsonPhoneInput from '../components/form/JsonPhoneInput'
+import {
+  getUniqueColumnValues,
+  getUniqueColumnsFromParentRepository,
+  getUniqueColumnsRepository,
+  getUserList,
+} from '../api/DropdownOptions'
 
 function cx(...classes) {
   return classes.filter(Boolean).join(' ')
@@ -61,6 +67,25 @@ function getOptions(field) {
   if (Array.isArray(opts)) return opts
 
   return []
+}
+
+function getOptionsType(field) {
+  return String(field?.settings?.specific?.optionsType || 'CUSTOM').toUpperCase()
+}
+
+function optionsKey(field, valuesById) {
+  const type = getOptionsType(field)
+  if (type === 'REPOSITORY' && field?.settings?.specific?.repositoryFieldParent) {
+    const parentId = field.settings.specific.repositoryFieldParent
+    const parentVal = valuesById?.[parentId] ?? ''
+    return `${field.id}::repoParent::${parentId}::${parentVal}`
+  }
+  if (type === 'MASTER' && field?.settings?.specific?.masterFormParentColumn) {
+    const parentId = field.settings.specific.masterFormParentColumn
+    const parentVal = valuesById?.[parentId] ?? ''
+    return `${field.id}::masterParent::${parentId}::${parentVal}`
+  }
+  return `${field.id}::static`
 }
 
 function isReadOnly(field) {
@@ -338,7 +363,7 @@ function FieldRenderer({
           disabled={disabled}
           placeholder={field?.settings?.general?.placeholder || ' '}
           onChange={(v) => onChange(v)}
-          onSelectPayload={(payload) => onLookupPayload?.(payload)}
+          onSelectPayload={(payload, srcField) => onLookupPayload?.(payload, srcField)}
         />
       ) : type === 'SHORT_TEXT' ? (
         <InputBase
@@ -386,9 +411,13 @@ function FieldRenderer({
         <SearchableSelect
           value={value ?? ''}
           onChange={(v) => onChange(v)}
-          options={getOptions(field)}
+          options={Array.isArray(field.__resolvedOptions) ? field.__resolvedOptions : getOptions(field)}
           disabled={disabled}
-          placeholder={field?.settings?.general?.placeholder || 'Select…'}
+          placeholder={
+            field.__optionsLoading
+              ? 'Loading…'
+              : field?.settings?.general?.placeholder || 'Select…'
+          }
         />
       ) : type === 'SINGLE_CHOICE' || type === 'RADIO' ? (
         <RadioCards field={field} value={value ?? ''} onChange={onChange} required={required} disabled={disabled} />
@@ -468,7 +497,36 @@ function TableField({ tableField, childrenFields, value, onChange, required }) {
                       }}
                       required={childRequired}
                       mainApplicantEmail=""
-                      onLookupPayload={() => {}}
+                      onLookupPayload={(payload, srcField) => {
+                        // When a lookup field is selected inside a TABLE row, fill sibling columns
+                        // based on lookupSettings.columnNameInAPI if present.
+                        const next = rows.slice()
+                        const updated = { ...(next[idx] || {}) }
+
+                        const raw = payload?.Raw || {}
+                        for (const sibling of childrenFields) {
+                          if (sibling.id === srcField?.id) continue
+                          const map = sibling?.settings?.lookupSettings?.columnNameInAPI
+                          const key = Array.isArray(map) ? map[0] : null
+                          if (key && raw && raw[key] !== undefined && raw[key] !== null) {
+                            updated[sibling.id] = raw[key]
+                          }
+                        }
+
+                        // Heuristic fallback (City/Province/Postal)
+                        const label = normalizeName(getLabelText(srcField || {})).toLowerCase()
+                        if (label.includes('address')) {
+                          for (const sibling of childrenFields) {
+                            const t = normalizeName(getLabelText(sibling)).toLowerCase()
+                            if (t.includes('city') && payload?.City) updated[sibling.id] = payload.City
+                            if (t.includes('province') && payload?.Province) updated[sibling.id] = payload.Province
+                            if (t.includes('postal') && payload?.PostalCode) updated[sibling.id] = payload.PostalCode
+                          }
+                        }
+
+                        next[idx] = updated
+                        onChange(next)
+                      }}
                     />
                   </div>
                 )
@@ -560,6 +618,13 @@ export default function ApplicationFormPage() {
   const [animDirection, setAnimDirection] = useState(0)
   const [stepErrors, setStepErrors] = useState({})
 
+  // Dropdown options cache: key -> { status, options, error }
+  const [dropdownState, setDropdownState] = useState({})
+
+  const setDropdown = useCallback((key, next) => {
+    setDropdownState((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), ...next } }))
+  }, [])
+
   const mainEmailFieldId = useMemo(() => {
     const emailFields = allFields.filter(
       (f) => String(f?.settings?.validation?.contentRule || '').toUpperCase() === 'EMAIL',
@@ -605,6 +670,86 @@ export default function ApplicationFormPage() {
       })
     },
     [allFields],
+  )
+
+  const loadDropdownOptions = useCallback(
+    async (field, valuesSnapshot) => {
+      const type = getOptionsType(field)
+      const key = optionsKey(field, valuesSnapshot)
+      const existing = dropdownState[key]
+      if (existing?.status === 'ready' || existing?.status === 'loading') return
+
+      setDropdown(key, { status: 'loading', options: [] })
+
+      try {
+        let opts = []
+
+        if (type === 'EXISTING') {
+          const wFormId = field?.settings?.specific?.wFormId || field?.settings?.specific?.masterFormId || 0
+          const payload = { column: field.id, keyword: '', rowFrom: 0, rowCount: 0 }
+          opts = await getUniqueColumnValues(wFormId, payload)
+        } else if (type === 'MASTER') {
+          const wFormId = field?.settings?.specific?.masterFormId || 0
+          const col = field?.settings?.specific?.masterFormColumn || field.id
+          const parentId = field?.settings?.specific?.masterFormParentColumn
+          const parentVal = parentId ? valuesSnapshot?.[parentId] : ''
+          const payload = parentVal
+            ? {
+                column: col,
+                keyword: '',
+                rowFrom: 0,
+                rowCount: 0,
+                filters: [
+                  {
+                    criteria: field?.settings?.specific?.masterFormParentColumn,
+                    condition: 'IS_EQUALS_TO',
+                    value: parentVal,
+                    dataType: '',
+                  },
+                ],
+              }
+            : { column: col, keyword: '', rowFrom: 0, rowCount: 0 }
+          opts = await getUniqueColumnValues(wFormId, payload)
+        } else if (type === 'REPOSITORY') {
+          const repoId = field?.settings?.specific?.repositoryId || 0
+          const repoField = field?.settings?.specific?.repositoryField || field.id
+          const parentId = field?.settings?.specific?.repositoryFieldParent
+          if (parentId) {
+            const parentVal = valuesSnapshot?.[parentId]
+            const payload = {
+              column: repoField,
+              keyword: '',
+              rowFrom: 0,
+              rowCount: 0,
+              filters: parentVal
+                ? [
+                    {
+                      criteria: parentId,
+                      condition: 'IS_EQUALS_TO',
+                      value: parentVal,
+                      dataType: '',
+                      fieldId: parentId,
+                    },
+                  ]
+                : [],
+            }
+            opts = await getUniqueColumnsFromParentRepository(repoId, payload)
+          } else {
+            opts = await getUniqueColumnsRepository(repoField, repoId)
+          }
+        } else if (type === 'PREDEFINED' && field?.settings?.specific?.predefinedTable === 'User') {
+          opts = await getUserList({ criteria: 'userType', value: 'Normal' })
+        } else {
+          // CUSTOM / PREDEFINED list stored in settings
+          opts = getOptions(field)
+        }
+
+        setDropdown(key, { status: 'ready', options: Array.isArray(opts) ? opts : [] })
+      } catch {
+        setDropdown(key, { status: 'error', error: 'Server error!', options: [] })
+      }
+    },
+    [dropdownState, setDropdown],
   )
 
   // Visibility: mimic your enableSettings -> controls logic
@@ -851,6 +996,23 @@ export default function ApplicationFormPage() {
                   const required = isMandatoryField(field.id, valuesById)
                   const col = getColSpanClass(field)
                   const type = String(field.type || '').toUpperCase()
+
+                  // Attach resolved dropdown options (like your defaultDropDownValues cache).
+                  const t = String(type)
+                  if (t === 'SINGLE_SELECT' || t === 'MULTI_SELECT') {
+                    const key = optionsKey(field, valuesById)
+                    const cached = dropdownState[key]
+                    const needsLoad = getOptionsType(field) !== 'CUSTOM' && cached?.status !== 'ready'
+                    if (needsLoad) {
+                      // fire-and-forget; state updates asynchronously
+                      loadDropdownOptions(field, valuesById)
+                    }
+                    field = {
+                      ...field,
+                      __resolvedOptions: cached?.options,
+                      __optionsLoading: cached?.status === 'loading' || (!cached && getOptionsType(field) !== 'CUSTOM'),
+                    }
+                  }
 
                   if (type === 'TABLE') {
                     const children =

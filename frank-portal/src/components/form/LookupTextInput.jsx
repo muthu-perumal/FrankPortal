@@ -105,7 +105,7 @@ export default function LookupTextInput({
       PostalCode: raw.PostalCode || desc.PostalCode,
       Raw: raw,
     }
-    onSelectPayload?.(payload)
+    onSelectPayload?.(payload, field)
   }
 
   useEffect(() => {
