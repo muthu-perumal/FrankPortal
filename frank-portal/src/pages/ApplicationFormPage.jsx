@@ -7,6 +7,7 @@ import SearchableSelect from '../components/form/SearchableSelect'
 import LookupTextInput from '../components/form/LookupTextInput'
 import EmailInviteInput from '../components/form/EmailInviteInput'
 import JsonPhoneInput from '../components/form/JsonPhoneInput'
+import LoadingPage from '../components/LoadingPage'
 import {
   getUniqueColumnValues,
   getUniqueColumnsFromParentRepository,
@@ -656,6 +657,10 @@ export default function ApplicationFormPage() {
   const transactionId = searchParams.get('tid')
   const processId = searchParams.get('pid')
 
+  const userData = useRef(null)
+  const inboxDataAll = useRef(null)
+  const [activityId, setActivityId] = useState(null)
+
   const formJson = useMemo(() => {
     try {
       const formSession = sessionStorage.getItem('formDetails')
@@ -698,6 +703,7 @@ export default function ApplicationFormPage() {
   const [currentStep, setCurrentStep] = useState(0)
   const [animDirection, setAnimDirection] = useState(0)
   const [stepErrors, setStepErrors] = useState({})
+  const [loading, setLoading] = useState(false)
 
   const [secureControls, setSecureControls] = useState([])
   const parentComponentChangeEvents = useRef({})
@@ -722,13 +728,34 @@ export default function ApplicationFormPage() {
   }, [allFields])
 
   useEffect(() => {
-    // Optional: hide secure controls if workflow session includes them
+    // Resolve secure controls from workflow session (supports "WorkFlowDetails" + activity block)
     try {
       const raw =
+        sessionStorage.getItem('WorkFlowDetails') ||
         sessionStorage.getItem('workflowSession') ||
         sessionStorage.getItem('workflowDetails') ||
         sessionStorage.getItem('workflow')
       const obj = raw ? JSON.parse(raw) : null
+
+      // If we have flowJson + blocks (WorkFlowDetails style), pick the block by activityId.
+      const flowJsonRaw = obj?.flowJson
+      if (flowJsonRaw) {
+        const parsed = JSON.parse(flowJsonRaw)
+        const blocks = Array.isArray(parsed?.blocks) ? parsed.blocks : []
+        const block = activityId
+          ? blocks.find((b) => String(b?.id) === String(activityId))
+          : blocks[0]
+        const list =
+          block?.settings?.formSecureControls ||
+          block?.settings?.secureControls ||
+          obj?.settings?.formSecureControls ||
+          obj?.settings?.secureControls ||
+          []
+        setSecureControls(Array.isArray(list) ? list : [])
+        return
+      }
+
+      // Fallback: simple list stored at workflow root
       const list =
         obj?.secureControls ||
         obj?.formSecureControls ||
@@ -739,7 +766,7 @@ export default function ApplicationFormPage() {
     } catch {
       setSecureControls([])
     }
-  }, [])
+  }, [activityId])
 
   useEffect(() => {
     // Build parent->children change events (for cascading dropdowns/resets)
@@ -1059,14 +1086,42 @@ export default function ApplicationFormPage() {
     }
 
     const fetchInbox = async () => {
+      setLoading(true)
       try {
         const inboxData = await getInboxItem(workflowId, processId, transactionId)
+        inboxDataAll.current = inboxData
+        setActivityId(inboxData?.activityId ?? null)
+
         const inboxFields = inboxData?.formData?.fields || {}
         if (inboxFields && typeof inboxFields === 'object') {
+          // Merge inbox values
           setValuesById((prev) => ({ ...prev, ...inboxFields }))
+
+          // Your extra logic: set role based on who raised the inbox item.
+          try {
+            const userRaw = sessionStorage.getItem('userDetails')
+            if (userRaw) userData.current = JSON.parse(userRaw)
+          } catch {
+            userData.current = null
+          }
+
+          const currentUserEmail = userData.current?.email
+          const raisedByEmail = inboxData?.raisedBy
+          const roleKey = 'uLtgR0XSazvt0CC6bK0l8'
+          const updatedFields = { ...inboxFields }
+
+          if (currentUserEmail && raisedByEmail && currentUserEmail === raisedByEmail) {
+            updatedFields[roleKey] = 'Primary'
+          } else if (currentUserEmail && raisedByEmail && currentUserEmail !== raisedByEmail) {
+            updatedFields[roleKey] = 'Coapplicant'
+          }
+
+          setValuesById((prev) => ({ ...prev, ...updatedFields }))
         }
       } catch {
         // ignore in demo mode
+      } finally {
+        setLoading(false)
       }
     }
 
@@ -1112,6 +1167,7 @@ export default function ApplicationFormPage() {
     setCurrentStep((prev) => (prev - 1 >= 0 ? prev - 1 : prev))
   }
 
+  if (loading) return <LoadingPage />
   if (!currentPanel) return null
 
   return (
