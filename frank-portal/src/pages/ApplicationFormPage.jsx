@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { BrandMark } from '../components/BrandMark'
-import { formDefinition } from '../data/formDefinition.sample'
+import { getInboxItem } from '../api/Portal'
+import { formDefinition as sampleDefinition } from '../data/formDefinition.sample'
 
 function cx(...classes) {
   return classes.filter(Boolean).join(' ')
@@ -17,36 +18,97 @@ function safeJsonParse(value) {
   }
 }
 
-function getOptions(field) {
-  const parsed = safeJsonParse(field.validationJson)
-  const opts = parsed?.specific?.customOptions
-  return Array.isArray(opts) ? opts : []
-}
-
 function normalizeName(name) {
   return String(name || '').trim()
 }
 
-function shouldShowField(field, valuesById, fieldsByName) {
-  const name = normalizeName(field.name)
-
-  // Simple conditional rendering for co-applicant fields:
-  // if there is a top-level question "Would you like to add a co-applicant?"
-  // and the answer is "Yes", show co-applicant fields. Otherwise hide them.
-  if (/\(co-applicant\)/i.test(name) || /^co-applicant/i.test(name)) {
-    const coQ = fieldsByName.get('would you like to add a co-applicant?')
-    if (!coQ) return true
-    const val = valuesById[coQ.id]
-    return String(val || '').toLowerCase() === 'yes'
-  }
-
-  return true
+function getLabelText(field) {
+  const raw = field?.displayLabel || field?.label || field?.name || ''
+  if (typeof raw !== 'string') return String(raw)
+  if (raw.startsWith('[HINT] -')) return raw.replace('[HINT] -', '').trim()
+  return raw
 }
 
-function Label({ children, required }) {
+function getColSpanClass(field) {
+  const size = field?.settings?.general?.size
+  if (size === 'col-4') return 'sm:col-span-4'
+  if (size === 'col-6') return 'sm:col-span-6'
+  if (size === 'col-12') return 'sm:col-span-12'
+  return 'sm:col-span-6'
+}
+
+function splitOptionsFromString(value) {
+  if (typeof value !== 'string') return []
+  const parts = value.split(',')
+  const list = parts.length === 1 ? value.split('\n') : parts
+  return list.map((s) => s.trim()).filter(Boolean)
+}
+
+function getOptions(field) {
+  // Primary source (your sample code): field.settings.specific.customOptions
+  const fromSettings = field?.settings?.specific?.customOptions
+  if (Array.isArray(fromSettings)) return fromSettings
+  const parsedFromSettings = splitOptionsFromString(fromSettings)
+  if (parsedFromSettings.length) return parsedFromSettings
+
+  // Fallback source (older API response): validationJson.specific.customOptions
+  const parsed = safeJsonParse(field?.validationJson)
+  const opts = parsed?.specific?.customOptions
+  if (Array.isArray(opts)) return opts
+
+  return []
+}
+
+function isReadOnly(field) {
+  return String(field?.settings?.general?.visibility || '').toUpperCase() === 'READ_ONLY'
+}
+
+function renderDivider(field) {
+  const type = String(field?.settings?.general?.dividerType || 'SOLID').toUpperCase()
+  const base = 'border-slate-200/70'
+  if (type === 'DOUBLE') {
+    return (
+      <div className="space-y-2">
+        <div className={cx('border-t', base)} />
+        <div className={cx('border-t', base)} />
+      </div>
+    )
+  }
+  const style =
+    type === 'DASHED'
+      ? 'border-t border-dashed'
+      : type === 'DOTTED'
+        ? 'border-t border-dotted'
+        : 'border-t border-solid'
+  return <div className={cx(style, base)} />
+}
+
+function Label({ field, required, hideLabel = false }) {
+  if (hideLabel) return null
+
+  const tooltip = field?.settings?.general?.tooltip
+  const hint = typeof field?.label === 'string' && field.label.startsWith('[HINT] -')
+  const text = getLabelText(field)
+
   return (
-    <div className="mb-2 text-sm font-semibold text-slate-900">
-      {children} {required ? <span className="text-red-500">*</span> : null}
+    <div className="mb-2 flex items-center gap-2">
+      <div
+        className={cx(
+          'text-sm font-medium',
+          hint ? 'text-amber-500' : 'text-slate-700',
+          isReadOnly(field) ? 'opacity-60' : '',
+        )}
+      >
+        {text} {required ? <span className="text-red-500">*</span> : null}
+      </div>
+      {tooltip ? (
+        <span
+          title={tooltip}
+          className="inline-flex h-5 w-5 cursor-help items-center justify-center rounded-full bg-slate-100 text-[11px] font-bold text-slate-600 ring-1 ring-slate-200"
+        >
+          ?
+        </span>
+      ) : null}
     </div>
   )
 }
@@ -56,7 +118,7 @@ function InputBase({ className, ...props }) {
     <input
       {...props}
       className={cx(
-        'w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20',
+        'w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:bg-slate-50 disabled:text-slate-500',
         className,
       )}
     />
@@ -68,7 +130,7 @@ function TextAreaBase({ className, ...props }) {
     <textarea
       {...props}
       className={cx(
-        'w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20',
+        'w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:bg-slate-50 disabled:text-slate-500',
         className,
       )}
     />
@@ -80,7 +142,7 @@ function SelectBase({ className, children, ...props }) {
     <select
       {...props}
       className={cx(
-        'w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20',
+        'w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:bg-slate-50 disabled:text-slate-500',
         className,
       )}
     >
@@ -89,12 +151,12 @@ function SelectBase({ className, children, ...props }) {
   )
 }
 
-function RadioCards({ field, value, onChange }) {
+function RadioCards({ field, value, onChange, required, disabled }) {
   const options = getOptions(field)
-  if (options.length === 0) {
+  if (!options.length) {
     return (
       <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-        No options configured for “{field.name}”
+        No options configured for “{getLabelText(field)}”
       </div>
     )
   }
@@ -111,6 +173,7 @@ function RadioCards({ field, value, onChange }) {
               checked
                 ? 'border-blue-600 bg-blue-50'
                 : 'border-slate-200 bg-sky-50/40 hover:border-slate-300',
+              disabled ? 'cursor-not-allowed opacity-60' : '',
             )}
           >
             <input
@@ -119,7 +182,8 @@ function RadioCards({ field, value, onChange }) {
               checked={checked}
               onChange={() => onChange(opt)}
               className="h-5 w-5 accent-blue-600"
-              required={field.isMandatory}
+              required={required}
+              disabled={disabled}
             />
             <span className="text-sm font-semibold text-slate-900">{opt}</span>
           </label>
@@ -129,22 +193,28 @@ function RadioCards({ field, value, onChange }) {
   )
 }
 
-function Checkboxes({ field, value, onChange }) {
+function Checkboxes({ field, value, onChange, required, disabled }) {
   const options = getOptions(field)
 
-  // If no options: treat it like a single consent checkbox.
-  if (options.length === 0) {
+  // If no options: treat it like a single consent checkbox (still styled).
+  if (!options.length) {
     const checked = Boolean(value)
     return (
-      <label className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-sky-50/40 px-5 py-4">
+      <label
+        className={cx(
+          'flex items-start gap-3 rounded-2xl border border-slate-200 bg-sky-50/40 px-5 py-4',
+          disabled ? 'cursor-not-allowed opacity-60' : '',
+        )}
+      >
         <input
           type="checkbox"
           checked={checked}
           onChange={(e) => onChange(e.target.checked)}
           className="mt-0.5 h-5 w-5 accent-blue-600"
-          required={field.isMandatory}
+          required={required}
+          disabled={disabled}
         />
-        <span className="text-sm font-semibold text-slate-900">{field.name}</span>
+        <span className="text-sm font-semibold text-slate-900">{getLabelText(field)}</span>
       </label>
     )
   }
@@ -158,7 +228,10 @@ function Checkboxes({ field, value, onChange }) {
         return (
           <label
             key={opt}
-            className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-sky-50/40 px-5 py-4"
+            className={cx(
+              'flex items-start gap-3 rounded-2xl border border-slate-200 bg-sky-50/40 px-5 py-4',
+              disabled ? 'cursor-not-allowed opacity-60' : '',
+            )}
           >
             <input
               type="checkbox"
@@ -170,190 +243,141 @@ function Checkboxes({ field, value, onChange }) {
                 onChange(Array.from(next))
               }}
               className="mt-0.5 h-5 w-5 accent-blue-600"
+              disabled={disabled}
             />
             <span className="text-sm font-semibold text-slate-900">{opt}</span>
           </label>
         )
       })}
-      {field.isMandatory ? (
-        <input
-          tabIndex={-1}
-          className="sr-only"
-          required
-          value={set.size > 0 ? 'ok' : ''}
-          onChange={() => {}}
-        />
+
+      {/* Required validation hook for checkbox groups */}
+      {required ? (
+        <input tabIndex={-1} className="sr-only" required value={set.size ? 'ok' : ''} readOnly />
       ) : null}
     </div>
   )
 }
 
 function applyBasicValidationProps(field) {
-  const parsed = safeJsonParse(field.validationJson)
+  const parsed = safeJsonParse(field?.validationJson)
   const rule = parsed?.validation?.contentRule
 
   if (field.type === 'SHORT_TEXT') {
     if (rule === 'EMAIL') return { type: 'email', inputMode: 'email' }
-    if (rule === 'ALPHA_SPACES') return { inputMode: 'text', pattern: "^[A-Za-z ]*$" }
-    if (rule === 'ALPHA_DASH') return { inputMode: 'text', pattern: "^[A-Za-z\\- ]*$" }
+    if (rule === 'ALPHA_SPACES') return { inputMode: 'text', pattern: '^[A-Za-z ]*$' }
+    if (rule === 'ALPHA_DASH') return { inputMode: 'text', pattern: '^[A-Za-z\\- ]*$' }
   }
 
   return {}
 }
 
-function FieldRenderer({ field, value, onChange }) {
-  const required = Boolean(field.isMandatory)
+function FieldRenderer({ field, value, onChange, required, hideLabel, error }) {
+  const disabled = isReadOnly(field)
+
   const common = {
     required,
     value: value ?? '',
     onChange: (e) => onChange(e.target.value),
+    disabled,
   }
 
-  switch (field.type) {
-    case 'SHORT_TEXT': {
-      const extra = applyBasicValidationProps(field)
-      return (
+  // Normalize some type aliases you used in your old renderer.
+  const type = String(field.type || '').toUpperCase()
+
+  if (type === 'DIVIDER') {
+    return <div className="pt-3">{renderDivider(field)}</div>
+  }
+
+  if (type === 'PARAGRAPH') {
+    const html = field?.settings?.specific?.textContent || ''
+    // NOTE: Keep as-is; in production you should sanitize HTML.
+    return <div className="prose prose-slate max-w-none" dangerouslySetInnerHTML={{ __html: html }} />
+  }
+
+  if (type === 'LABEL') {
+    return <Label field={field} required={required} hideLabel={hideLabel} />
+  }
+
+  return (
+    <div>
+      <Label field={field} required={required} hideLabel={hideLabel} />
+
+      {type === 'SHORT_TEXT' ? (
+        <InputBase {...common} {...applyBasicValidationProps(field)} placeholder=" " />
+      ) : type === 'LONG_TEXT' ? (
+        <TextAreaBase
+          rows={4}
+          required={required}
+          value={value ?? ''}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+          placeholder=" "
+        />
+      ) : type === 'PHONE_NUMBER' ? (
+        <InputBase type="tel" inputMode="tel" {...common} placeholder="(555) 123-4567" />
+      ) : type === 'DATE' ? (
         <div>
-          <Label required={required}>{field.name}</Label>
-          <InputBase {...common} {...extra} placeholder="Enter value" />
-        </div>
-      )
-    }
-    case 'LONG_TEXT':
-      return (
-        <div>
-          <Label required={required}>{field.name}</Label>
-          <TextAreaBase
-            rows={4}
-            required={required}
-            value={value ?? ''}
-            onChange={(e) => onChange(e.target.value)}
-            placeholder="Enter details"
-          />
-        </div>
-      )
-    case 'PHONE_NUMBER':
-      return (
-        <div>
-          <Label required={required}>{field.name}</Label>
-          <InputBase
-            type="tel"
-            inputMode="tel"
-            {...common}
-            placeholder="(555) 123-4567"
-          />
-        </div>
-      )
-    case 'DATE':
-      return (
-        <div>
-          <Label required={required}>{field.name}</Label>
           <InputBase type="date" {...common} />
           {normalizeName(field.name).toLowerCase() === 'date of birth' ? (
-            <div className="mt-2 text-xs text-slate-500">
-              You must be 18 or older to apply
-            </div>
+            <div className="mt-2 text-xs text-slate-500">You must be 18 or older to apply</div>
           ) : null}
         </div>
-      )
-    case 'NUMBER':
-      return (
-        <div>
-          <Label required={required}>{field.name}</Label>
-          <InputBase type="number" inputMode="numeric" step="1" {...common} />
-        </div>
-      )
-    case 'CURRENCY_AMOUNT':
-      return (
-        <div>
-          <Label required={required}>{field.name}</Label>
-          <div className="relative">
-            <div className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
-              $
-            </div>
-            <InputBase
-              className="pl-8"
-              type="number"
-              inputMode="decimal"
-              step="0.01"
-              {...common}
-              placeholder="0.00"
-            />
+      ) : type === 'TIME' ? (
+        <InputBase type="time" {...common} />
+      ) : type === 'NUMBER' ? (
+        <InputBase type="number" inputMode="numeric" step="1" {...common} />
+      ) : type === 'CURRENCY_AMOUNT' || type === 'CURRENCY' ? (
+        <div className="relative">
+          <div className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
+            $
           </div>
+          <InputBase className="pl-8" type="number" inputMode="decimal" step="0.01" {...common} placeholder="0.00" />
         </div>
-      )
-    case 'URL':
-      return (
-        <div>
-          <Label required={required}>{field.name}</Label>
-          <InputBase type="url" inputMode="url" {...common} placeholder="https://..." />
-        </div>
-      )
-    case 'SINGLE_SELECT': {
-      const options = getOptions(field)
-      return (
-        <div>
-          <Label required={required}>{field.name}</Label>
-          <SelectBase
-            required={required}
-            value={value ?? ''}
-            onChange={(e) => onChange(e.target.value)}
-          >
-            <option value="" disabled>
-              Select…
+      ) : type === 'URL' ? (
+        <InputBase type="url" inputMode="url" {...common} placeholder="https://..." />
+      ) : type === 'SINGLE_SELECT' || type === 'MULTI_SELECT' ? (
+        <SelectBase
+          required={required}
+          value={value ?? ''}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+        >
+          <option value="" disabled>
+            Select…
+          </option>
+          {getOptions(field).map((o) => (
+            <option key={o} value={o}>
+              {o}
             </option>
-            {options.map((o) => (
-              <option key={o} value={o}>
-                {o}
-              </option>
-            ))}
-          </SelectBase>
-        </div>
-      )
-    }
-    case 'SINGLE_CHOICE': {
-      // Styled radio cards (matches screenshots like Residence Type)
-      return (
-        <div>
-          <Label required={required}>{field.name}</Label>
-          <RadioCards field={field} value={value ?? ''} onChange={onChange} />
-        </div>
-      )
-    }
-    case 'MULTIPLE_CHOICE':
-      return (
-        <div>
-          <Label required={required}>{field.name}</Label>
-          <Checkboxes field={field} value={value} onChange={onChange} />
-        </div>
-      )
-    case 'CALCULATED':
-      return (
-        <div>
-          <Label required={required}>{field.name}</Label>
-          <InputBase disabled value={value ?? ''} placeholder="Calculated" />
-        </div>
-      )
-    default:
-      return (
+          ))}
+        </SelectBase>
+      ) : type === 'SINGLE_CHOICE' || type === 'RADIO' ? (
+        <RadioCards field={field} value={value ?? ''} onChange={onChange} required={required} disabled={disabled} />
+      ) : type === 'MULTI_CHOICE' || type === 'MULTIPLE_CHOICE' || type === 'CHECKBOX' ? (
+        <Checkboxes field={field} value={value} onChange={onChange} required={required} disabled={disabled} />
+      ) : type === 'CALCULATED' ? (
+        <InputBase disabled value={value ?? ''} placeholder="Calculated" />
+      ) : (
         <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-600">
           Unsupported field type: <span className="font-semibold">{field.type}</span>
         </div>
-      )
-  }
+      )}
+
+      {error ? <p className="mt-1 text-xs font-medium text-red-500">{error}</p> : null}
+    </div>
+  )
 }
 
-function TableField({ tableField, childrenFields, value, onChange }) {
+function TableField({ tableField, childrenFields, value, onChange, required }) {
   const rows = Array.isArray(value) ? value : []
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <div className="text-base font-extrabold text-slate-900">{tableField.name}</div>
-          <div className="mt-1 text-xs text-slate-500">
-            Add previous addresses as needed.
-          </div>
+          <div className="text-base font-extrabold text-slate-900">{getLabelText(tableField)}</div>
+          <div className="mt-1 text-xs text-slate-500">Add rows as needed.</div>
+          {required ? <div className="mt-1 text-xs font-semibold text-red-500">This table is required</div> : null}
         </div>
         <button
           type="button"
@@ -384,20 +408,28 @@ function TableField({ tableField, childrenFields, value, onChange }) {
               </button>
             </div>
 
-            <div className="mt-4 grid grid-cols-1 gap-5 sm:grid-cols-2">
-              {childrenFields.map((child) => (
-                <div key={child.id} className="sm:col-span-1">
-                  <FieldRenderer
-                    field={child}
-                    value={row[child.id]}
-                    onChange={(v) => {
-                      const next = rows.slice()
-                      next[idx] = { ...next[idx], [child.id]: v }
-                      onChange(next)
-                    }}
-                  />
-                </div>
-              ))}
+            <div className="mt-4 grid grid-cols-1 gap-5 sm:grid-cols-12">
+              {childrenFields.map((child) => {
+                const col = getColSpanClass(child)
+                const childRequired =
+                  String(child?.settings?.validation?.fieldRule || '').toUpperCase() === 'REQUIRED' &&
+                  String(child?.settings?.general?.visibility || '').toUpperCase() === 'NORMAL'
+
+                return (
+                  <div key={child.id} className={col}>
+                    <FieldRenderer
+                      field={child}
+                      value={row[child.id]}
+                      onChange={(v) => {
+                        const next = rows.slice()
+                        next[idx] = { ...next[idx], [child.id]: v }
+                        onChange(next)
+                      }}
+                      required={childRequired}
+                    />
+                  </div>
+                )
+              })}
             </div>
           </div>
         ))}
@@ -406,128 +438,406 @@ function TableField({ tableField, childrenFields, value, onChange }) {
   )
 }
 
+function buildFallbackPanelsFromSample() {
+  const fields = sampleDefinition.map((f) => {
+    const parsed = safeJsonParse(f.validationJson)
+    const opts = parsed?.specific?.customOptions
+    const customOptions = Array.isArray(opts) ? opts.join(',') : ''
+
+    return {
+      id: String(f.id),
+      name: f.name,
+      label: f.name,
+      displayLabel: f.name,
+      type: f.type,
+      settings: {
+        general: { size: 'col-6', visibility: 'NORMAL', tooltip: '' },
+        validation: { fieldRule: f.isMandatory ? 'REQUIRED' : 'OPTIONAL', enableSettings: [], mandatorySettings: [] },
+        specific: { customOptions, textContent: '', tableColumns: [] },
+      },
+    }
+  })
+
+  return [
+    {
+      id: 'panel-fallback-1',
+      settings: { title: 'Application', description: 'Fill out your details.' },
+      fields,
+    },
+  ]
+}
+
 export default function ApplicationFormPage() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
 
-  const fields = useMemo(() => formDefinition, [])
-  const fieldsByName = useMemo(() => {
-    const m = new Map()
-    for (const f of fields) m.set(normalizeName(f.name).toLowerCase(), f)
-    return m
-  }, [fields])
+  const transactionId = searchParams.get('tid')
+  const processId = searchParams.get('pid')
 
-  const topLevelFields = useMemo(() => fields.filter((f) => Number(f.parentId) === 0), [fields])
-
-  const tableChildrenByParent = useMemo(() => {
-    const m = new Map()
-    for (const f of fields) {
-      const pid = Number(f.parentId)
-      if (!pid) continue
-      if (!m.has(pid)) m.set(pid, [])
-      m.get(pid).push(f)
+  const formJson = useMemo(() => {
+    try {
+      const formSession = sessionStorage.getItem('formDetails')
+      const formData = formSession ? JSON.parse(formSession) : null
+      const raw = formData?.formJson
+      return raw ? JSON.parse(raw) : null
+    } catch {
+      return null
     }
-    return m
-  }, [fields])
+  }, [])
 
-  const [valuesById, setValuesById] = useState({})
+  const panels = useMemo(() => {
+    const list = formJson?.panels
+    if (Array.isArray(list) && list.length) return list
+    return buildFallbackPanelsFromSample()
+  }, [formJson])
 
-  const visibleTopFields = useMemo(
+  const allFields = useMemo(
     () =>
-      topLevelFields.filter((f) => shouldShowField(f, valuesById, fieldsByName)),
-    [topLevelFields, valuesById, fieldsByName],
+      panels.flatMap((p) =>
+        Array.isArray(p.fields)
+          ? p.fields.map((f) => ({
+              ...f,
+              panelId: p.id,
+            }))
+          : [],
+      ),
+    [panels],
   )
 
+  const allFieldsById = useMemo(() => {
+    const m = new Map()
+    allFields.forEach((f) => m.set(f.id, f))
+    return m
+  }, [allFields])
+
+  const getFieldById = useCallback((id) => allFieldsById.get(id), [allFieldsById])
+
+  const [valuesById, setValuesById] = useState({})
+  const [currentStep, setCurrentStep] = useState(0)
+  const [animDirection, setAnimDirection] = useState(0)
+  const [stepErrors, setStepErrors] = useState({})
+
+  // Visibility: mimic your enableSettings -> controls logic
+  const visibleFormControl = useCallback((fieldId, values) => {
+    let decided
+    for (const f of allFields) {
+      const enableSettings = f?.settings?.validation?.enableSettings || []
+      enableSettings.forEach((setting) => {
+        const controls = setting?.controls || []
+        if (!controls.includes(fieldId)) return
+        const expected = setting.value
+        const val = values[f.id]
+        const match = Array.isArray(val) ? val?.includes?.(expected) : val == expected
+        if (match) decided = true
+        else if (decided !== true) decided = false
+      })
+    }
+    if (decided !== undefined) return decided
+
+    const componentData = getFieldById(fieldId)
+    if (String(componentData?.settings?.general?.visibility || '').toUpperCase() === 'DISABLE') return false
+    return true
+  }, [allFields, getFieldById])
+
+  // Mandatory: base fieldRule + mandatorySettings conditions
+  const isMandatoryField = (fieldId, values) => {
+    const field = getFieldById(fieldId)
+    if (!field) return false
+    let required = String(field.settings?.validation?.fieldRule || '').toUpperCase() === 'REQUIRED'
+
+    for (const f of allFields) {
+      const mandatorySettings = f?.settings?.validation?.mandatorySettings || []
+      mandatorySettings.forEach((setting) => {
+        const controls = setting?.controls || []
+        if (!controls.includes(fieldId)) return
+        const expected = setting.value
+        const val = values[f.id]
+        const match = Array.isArray(val) ? val?.includes?.(expected) : val == expected
+        if (match) required = true
+      })
+    }
+
+    if (!visibleFormControl(fieldId, values)) return false
+    return required
+  }
+
+  // Defaults from field settings (subset of your logic)
+  const getInputDefaultValues = (field) => {
+    const specific = field?.settings?.specific ?? {}
+    if (
+      specific.customDefaultValue !== undefined &&
+      specific.customDefaultValue !== null &&
+      specific.customDefaultValue !== ''
+    ) {
+      return specific.customDefaultValue?.toString?.() ?? String(specific.customDefaultValue)
+    }
+    if (specific.defaultValue === 'CURRENT_DATE') return new Date().toISOString().slice(0, 10)
+    if (specific.defaultValue === 'CURRENT_TIME') return new Date().toISOString().slice(11, 16)
+    if (specific.defaultValue === 'CURRENT_DATE_TIME') return new Date().toISOString()
+    return null
+  }
+
+  useEffect(() => {
+    if (!allFields.length) return
+    const defaults = {}
+    allFields.forEach((f) => {
+      const v = getInputDefaultValues(f)
+      if (v !== null && v !== undefined) defaults[f.id] = v
+    })
+    if (Object.keys(defaults).length) setValuesById((p) => ({ ...defaults, ...p }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allFields.length])
+
+  // Load existing values if tid/pid exist
+  useEffect(() => {
+    if (!transactionId || !processId) return
+    let workflowId = ''
+    try {
+      const portalRaw = sessionStorage.getItem('portalDetails')
+      const portalDetails = portalRaw ? JSON.parse(portalRaw) : null
+      workflowId = portalDetails?.workflowId || ''
+    } catch {
+      workflowId = ''
+    }
+
+    const fetchInbox = async () => {
+      try {
+        const inboxData = await getInboxItem(workflowId, processId, transactionId)
+        const inboxFields = inboxData?.formData?.fields || {}
+        if (inboxFields && typeof inboxFields === 'object') {
+          setValuesById((prev) => ({ ...prev, ...inboxFields }))
+        }
+      } catch {
+        // ignore in demo mode
+      }
+    }
+
+    fetchInbox()
+  }, [transactionId, processId])
+
+  const visiblePanels = useMemo(() => {
+    return panels.filter((panel) => {
+      const panelFields = Array.isArray(panel.fields) ? panel.fields : []
+      return panelFields.some((f) => visibleFormControl(f.id, valuesById))
+    })
+  }, [panels, valuesById, visibleFormControl])
+
+  const currentPanel = visiblePanels[currentStep] ?? visiblePanels[0]
+
+  const validateCurrentPanel = () => {
+    if (!currentPanel) return true
+    const panelFields = Array.isArray(currentPanel.fields) ? currentPanel.fields : []
+    const errors = {}
+    panelFields.forEach((field) => {
+      if (!visibleFormControl(field.id, valuesById)) return
+      if (!isMandatoryField(field.id, valuesById)) return
+      const v = valuesById[field.id]
+      const empty =
+        v === null ||
+        v === undefined ||
+        (typeof v === 'string' && v.trim() === '') ||
+        (Array.isArray(v) && v.length === 0)
+      if (empty) errors[field.id] = `${getLabelText(field) || 'Field'} is required`
+    })
+    setStepErrors(errors)
+    return Object.keys(errors).length === 0
+  }
+
+  const goNext = () => {
+    if (!validateCurrentPanel()) return
+    setAnimDirection(1)
+    setCurrentStep((prev) => (prev + 1 < visiblePanels.length ? prev + 1 : prev))
+  }
+
+  const goBack = () => {
+    setAnimDirection(-1)
+    setCurrentStep((prev) => (prev - 1 >= 0 ? prev - 1 : prev))
+  }
+
+  if (!currentPanel) return null
+
   return (
-    <div className="min-h-screen">
-      <div className="mx-auto w-full max-w-5xl px-5 pt-8">
-        <div className="rounded-2xl bg-white/80 px-6 py-4 shadow-[0_14px_40px_rgba(15,23,42,0.08)] ring-1 ring-slate-900/5 backdrop-blur">
-          <div className="flex items-center justify-between gap-4">
-            <BrandMark />
-            <button
-              type="button"
-              onClick={() => navigate('/home')}
-              className="text-xs font-semibold text-slate-500 hover:text-slate-900"
-            >
-              Back to Home
-            </button>
+    <div className="min-h-screen bg-slate-50">
+      <div className="mx-auto flex w-full max-w-6xl gap-8 px-5 pb-16 pt-8">
+        <aside className="hidden w-64 flex-shrink-0 flex-col rounded-2xl bg-white/90 p-6 shadow-[0_18px_40px_rgba(15,23,42,0.12)] ring-1 ring-slate-900/5 lg:flex">
+          <div className="mb-6">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Your Application Progress
+            </div>
           </div>
-        </div>
-
-        <div className="mt-8">
-          <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
-            New Application
-          </h1>
-          <p className="mt-2 text-sm text-slate-500">
-            This page renders controls dynamically from your JSON.
-          </p>
-        </div>
-
-        <form
-          className="mt-8 space-y-8 pb-16"
-          onSubmit={(e) => {
-            e.preventDefault()
-            // For now: just show the payload in console
-            // Later you can POST this to your API.
-            console.log('Form submit:', valuesById)
-            alert('Saved (check console for payload).')
-          }}
-        >
-          <div className="rounded-2xl bg-white p-6 shadow-[0_18px_40px_rgba(15,23,42,0.10)] ring-1 ring-slate-900/5">
-            <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-              {visibleTopFields.map((field) => {
-                const isTable = field.type === 'TABLE'
-                const show = shouldShowField(field, valuesById, fieldsByName)
-                if (!show) return null
-
-                if (isTable) {
-                  const children = tableChildrenByParent.get(field.id) ?? []
-                  return (
-                    <div key={field.id} className="sm:col-span-2">
-                      <TableField
-                        tableField={field}
-                        childrenFields={children}
-                        value={valuesById[field.id]}
-                        onChange={(v) => setValuesById((p) => ({ ...p, [field.id]: v }))}
-                      />
+          <ol className="space-y-3">
+            {visiblePanels.map((panel, index) => {
+              const isActive = index === currentStep
+              const isCompleted = index < currentStep
+              return (
+                <li key={panel.id}>
+                  <button
+                    type="button"
+                    className={cx(
+                      'flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-left transition',
+                      isActive
+                        ? 'bg-blue-50 text-blue-700 ring-1 ring-blue-200'
+                        : isCompleted
+                          ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
+                          : 'bg-slate-50 text-slate-600 hover:bg-slate-100',
+                    )}
+                    onClick={() => setCurrentStep(index)}
+                  >
+                    <div
+                      className={cx(
+                        'flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold',
+                        isActive
+                          ? 'bg-blue-600 text-white'
+                          : isCompleted
+                            ? 'bg-emerald-500 text-white'
+                            : 'bg-slate-200 text-slate-600',
+                      )}
+                    >
+                      {index + 1}
                     </div>
-                  )
-                }
+                    <div className="flex flex-col">
+                      <span className="text-xs font-semibold uppercase tracking-[0.14em]">
+                        {panel?.settings?.title || `Step ${index + 1}`}
+                      </span>
+                      {panel?.settings?.description ? (
+                        <span className="mt-0.5 line-clamp-2 text-[11px] text-slate-500">
+                          {panel.settings.description}
+                        </span>
+                      ) : null}
+                    </div>
+                  </button>
+                </li>
+              )
+            })}
+          </ol>
+        </aside>
 
-                // Give certain fields full width (better UX)
-                const full =
-                  field.type === 'SINGLE_CHOICE' ||
-                  field.type === 'MULTIPLE_CHOICE' ||
-                  /date of birth/i.test(field.name)
-
-                return (
-                  <div key={field.id} className={cx(full ? 'sm:col-span-2' : 'sm:col-span-1')}>
-                    <FieldRenderer
-                      field={field}
-                      value={valuesById[field.id]}
-                      onChange={(v) => setValuesById((p) => ({ ...p, [field.id]: v }))}
-                    />
-                  </div>
-                )
-              })}
+        <div className="flex-1">
+          <div className="rounded-2xl bg-white/80 px-6 py-4 shadow-[0_14px_40px_rgba(15,23,42,0.08)] ring-1 ring-slate-900/5 backdrop-blur">
+            <div className="flex items-center justify-between gap-4">
+              <BrandMark />
+              <button
+                type="button"
+                onClick={() => navigate('/home')}
+                className="text-xs font-semibold text-slate-500 hover:text-slate-900"
+              >
+                Back to Home
+              </button>
             </div>
           </div>
 
-          <div className="flex items-center justify-end gap-3">
-            <button
-              type="button"
-              onClick={() => setValuesById({})}
-              className="rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-            >
-              Reset
-            </button>
-            <button
-              type="submit"
-              className="rounded-xl bg-amber-400 px-6 py-3 text-sm font-extrabold text-slate-900 shadow-[0_12px_24px_rgba(245,158,11,0.30)] hover:bg-amber-300"
-            >
-              Save & Continue
-            </button>
+          <div className="mt-8">
+            <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
+              {currentPanel?.settings?.title || 'Application'}
+            </h1>
+            <p className="mt-2 text-sm text-slate-500">
+              {currentPanel?.settings?.description ||
+                'Tell us a bit about yourself so we can personalize your mortgage experience.'}
+            </p>
           </div>
-        </form>
+
+          <form
+            className="mt-8 space-y-8"
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (!validateCurrentPanel()) return
+              console.log('Form submit:', valuesById)
+            }}
+          >
+            <div
+              className={cx(
+                'rounded-2xl bg-white p-6 shadow-[0_18px_40px_rgba(15,23,42,0.10)] ring-1 ring-slate-900/5 transition-all duration-300',
+                animDirection === 1
+                  ? 'translate-x-2 opacity-100'
+                  : animDirection === -1
+                    ? '-translate-x-2 opacity-100'
+                    : 'opacity-100',
+              )}
+            >
+              <div className="grid grid-cols-1 gap-6 sm:grid-cols-12">
+                {(Array.isArray(currentPanel.fields) ? currentPanel.fields : []).map((field) => {
+                  if (!visibleFormControl(field.id, valuesById)) return null
+
+                  const required = isMandatoryField(field.id, valuesById)
+                  const col = getColSpanClass(field)
+                  const type = String(field.type || '').toUpperCase()
+
+                  if (type === 'TABLE') {
+                    const children =
+                      field?.settings?.specific?.tableColumns ||
+                      field?.settings?.specific?.tableColumns?.columns ||
+                      []
+                    const childrenFields = Array.isArray(children) ? children : []
+                    return (
+                      <div key={field.id} className="sm:col-span-12">
+                        <TableField
+                          tableField={field}
+                          childrenFields={childrenFields}
+                          value={valuesById[field.id]}
+                          onChange={(v) => setValuesById((p) => ({ ...p, [field.id]: v }))}
+                          required={required}
+                        />
+                      </div>
+                    )
+                  }
+
+                  return (
+                    <div key={field.id} className={col}>
+                      <FieldRenderer
+                        field={field}
+                        value={valuesById[field.id]}
+                        onChange={(v) => setValuesById((p) => ({ ...p, [field.id]: v }))}
+                        required={required}
+                        hideLabel={false}
+                        error={stepErrors[field.id]}
+                      />
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 pt-2">
+              <button
+                type="button"
+                onClick={goBack}
+                disabled={currentStep === 0}
+                className={cx(
+                  'rounded-xl border px-5 py-3 text-sm font-semibold transition',
+                  currentStep === 0
+                    ? 'border-slate-200 text-slate-300'
+                    : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50',
+                )}
+              >
+                Back
+              </button>
+
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => setValuesById({})}
+                  className="rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  Reset
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!validateCurrentPanel()) return
+                    if (currentStep === visiblePanels.length - 1) {
+                      console.log('Final submit:', valuesById)
+                    } else {
+                      goNext()
+                    }
+                  }}
+                  className="rounded-xl bg-amber-400 px-6 py-3 text-sm font-extrabold text-slate-900 shadow-[0_12px_24px_rgba(245,158,11,0.30)] hover:bg-amber-300"
+                >
+                  {currentStep === visiblePanels.length - 1 ? 'Save' : 'Save & Continue'}
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
       </div>
     </div>
   )
