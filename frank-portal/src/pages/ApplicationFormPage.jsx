@@ -3,6 +3,10 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { BrandMark } from '../components/BrandMark'
 import { getInboxItem } from '../api/Portal'
 import { formDefinition as sampleDefinition } from '../data/formDefinition.sample'
+import SearchableSelect from '../components/form/SearchableSelect'
+import LookupTextInput from '../components/form/LookupTextInput'
+import EmailInviteInput from '../components/form/EmailInviteInput'
+import JsonPhoneInput from '../components/form/JsonPhoneInput'
 
 function cx(...classes) {
   return classes.filter(Boolean).join(' ')
@@ -271,8 +275,18 @@ function applyBasicValidationProps(field) {
   return {}
 }
 
-function FieldRenderer({ field, value, onChange, required, hideLabel, error }) {
+function FieldRenderer({
+  field,
+  value,
+  onChange,
+  required,
+  hideLabel,
+  error,
+  mainApplicantEmail,
+  onLookupPayload,
+}) {
   const disabled = isReadOnly(field)
+  const [localError, setLocalError] = useState('')
 
   const common = {
     required,
@@ -283,6 +297,11 @@ function FieldRenderer({ field, value, onChange, required, hideLabel, error }) {
 
   // Normalize some type aliases you used in your old renderer.
   const type = String(field.type || '').toUpperCase()
+  const contentRule = String(field?.settings?.validation?.contentRule || '').toUpperCase()
+  const verificationRequired = Boolean(field?.settings?.validation?.verificationRequired)
+  const hasLookup =
+    Boolean(field?.settings?.lookupSettings?.columnName) ||
+    Boolean(field?.settings?.lookupSettings?.columnNameInAPI)
 
   if (type === 'DIVIDER') {
     return <div className="pt-3">{renderDivider(field)}</div>
@@ -302,8 +321,31 @@ function FieldRenderer({ field, value, onChange, required, hideLabel, error }) {
     <div>
       <Label field={field} required={required} hideLabel={hideLabel} />
 
-      {type === 'SHORT_TEXT' ? (
-        <InputBase {...common} {...applyBasicValidationProps(field)} placeholder=" " />
+      {type === 'SHORT_TEXT' && contentRule === 'EMAIL' ? (
+        <EmailInviteInput
+          value={value ?? ''}
+          disabled={disabled}
+          verificationRequired={verificationRequired}
+          isCoApplicant={/co-applicant/i.test(getLabelText(field))}
+          mainApplicantEmail={mainApplicantEmail || ''}
+          onValidationError={(msg) => setLocalError(msg || '')}
+          onChange={(v) => onChange(v)}
+        />
+      ) : type === 'SHORT_TEXT' && hasLookup ? (
+        <LookupTextInput
+          field={field}
+          value={value ?? ''}
+          disabled={disabled}
+          placeholder={field?.settings?.general?.placeholder || ' '}
+          onChange={(v) => onChange(v)}
+          onSelectPayload={(payload) => onLookupPayload?.(payload)}
+        />
+      ) : type === 'SHORT_TEXT' ? (
+        <InputBase
+          {...common}
+          {...applyBasicValidationProps(field)}
+          placeholder={field?.settings?.general?.placeholder || ' '}
+        />
       ) : type === 'LONG_TEXT' ? (
         <TextAreaBase
           rows={4}
@@ -311,10 +353,15 @@ function FieldRenderer({ field, value, onChange, required, hideLabel, error }) {
           value={value ?? ''}
           onChange={(e) => onChange(e.target.value)}
           disabled={disabled}
-          placeholder=" "
+          placeholder={field?.settings?.general?.placeholder || ' '}
         />
       ) : type === 'PHONE_NUMBER' ? (
-        <InputBase type="tel" inputMode="tel" {...common} placeholder="(555) 123-4567" />
+        <JsonPhoneInput
+          value={value ?? ''}
+          onChange={(v) => onChange(v)}
+          disabled={disabled}
+          placeholder={field?.settings?.general?.placeholder || '(555) 123-4567'}
+        />
       ) : type === 'DATE' ? (
         <div>
           <InputBase type="date" {...common} />
@@ -336,21 +383,13 @@ function FieldRenderer({ field, value, onChange, required, hideLabel, error }) {
       ) : type === 'URL' ? (
         <InputBase type="url" inputMode="url" {...common} placeholder="https://..." />
       ) : type === 'SINGLE_SELECT' || type === 'MULTI_SELECT' ? (
-        <SelectBase
-          required={required}
+        <SearchableSelect
           value={value ?? ''}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(v) => onChange(v)}
+          options={getOptions(field)}
           disabled={disabled}
-        >
-          <option value="" disabled>
-            Select…
-          </option>
-          {getOptions(field).map((o) => (
-            <option key={o} value={o}>
-              {o}
-            </option>
-          ))}
-        </SelectBase>
+          placeholder={field?.settings?.general?.placeholder || 'Select…'}
+        />
       ) : type === 'SINGLE_CHOICE' || type === 'RADIO' ? (
         <RadioCards field={field} value={value ?? ''} onChange={onChange} required={required} disabled={disabled} />
       ) : type === 'MULTI_CHOICE' || type === 'MULTIPLE_CHOICE' || type === 'CHECKBOX' ? (
@@ -363,7 +402,9 @@ function FieldRenderer({ field, value, onChange, required, hideLabel, error }) {
         </div>
       )}
 
-      {error ? <p className="mt-1 text-xs font-medium text-red-500">{error}</p> : null}
+      {error || localError ? (
+        <p className="mt-1 text-xs font-medium text-red-500">{error || localError}</p>
+      ) : null}
     </div>
   )
 }
@@ -426,6 +467,8 @@ function TableField({ tableField, childrenFields, value, onChange, required }) {
                         onChange(next)
                       }}
                       required={childRequired}
+                      mainApplicantEmail=""
+                      onLookupPayload={() => {}}
                     />
                   </div>
                 )
@@ -516,6 +559,53 @@ export default function ApplicationFormPage() {
   const [currentStep, setCurrentStep] = useState(0)
   const [animDirection, setAnimDirection] = useState(0)
   const [stepErrors, setStepErrors] = useState({})
+
+  const mainEmailFieldId = useMemo(() => {
+    const emailFields = allFields.filter(
+      (f) => String(f?.settings?.validation?.contentRule || '').toUpperCase() === 'EMAIL',
+    )
+    const preferred = emailFields.find(
+      (f) => !/co-applicant/i.test(getLabelText(f)) && normalizeName(getLabelText(f)).toLowerCase() === 'email',
+    )
+    const fallback = emailFields.find((f) => !/co-applicant/i.test(getLabelText(f)))
+    return preferred?.id || fallback?.id || ''
+  }, [allFields])
+
+  const mainApplicantEmail = useMemo(() => {
+    if (!mainEmailFieldId) return ''
+    const raw = valuesById[mainEmailFieldId]
+    if (!raw) return ''
+    const parsed = safeJsonParse(raw)
+    if (parsed && typeof parsed === 'object') return String(parsed.value || '').trim()
+    return String(raw || '').trim()
+  }, [mainEmailFieldId, valuesById])
+
+  const handleLookupPayload = useCallback(
+    (payload) => {
+      if (!payload) return
+      const city = payload.City
+      const province = payload.Province
+      const postal = payload.PostalCode
+
+      setValuesById((prev) => {
+        const next = { ...prev }
+        const candidates = allFields.filter((f) => {
+          const t = normalizeName(getLabelText(f)).toLowerCase()
+          return t.includes('city') || t.includes('province') || t.includes('postal')
+        })
+
+        for (const f of candidates) {
+          const t = normalizeName(getLabelText(f)).toLowerCase()
+          if (t.includes('city') && city && !next[f.id]) next[f.id] = city
+          if (t.includes('province') && province && !next[f.id]) next[f.id] = province
+          if (t.includes('postal') && postal && !next[f.id]) next[f.id] = postal
+        }
+
+        return next
+      })
+    },
+    [allFields],
+  )
 
   // Visibility: mimic your enableSettings -> controls logic
   const visibleFormControl = useCallback((fieldId, values) => {
@@ -790,6 +880,8 @@ export default function ApplicationFormPage() {
                         required={required}
                         hideLabel={false}
                         error={stepErrors[field.id]}
+                        mainApplicantEmail={mainApplicantEmail}
+                        onLookupPayload={handleLookupPayload}
                       />
                     </div>
                   )
