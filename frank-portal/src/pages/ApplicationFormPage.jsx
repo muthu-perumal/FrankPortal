@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { BrandMark } from '../components/BrandMark'
 import { getInboxItem } from '../api/Portal'
@@ -86,6 +86,87 @@ function optionsKey(field, valuesById) {
     return `${field.id}::masterParent::${parentId}::${parentVal}`
   }
   return `${field.id}::static`
+}
+
+function computeVisibilityMap({ controls, values, secureControls }) {
+  const secure = Array.isArray(secureControls) ? secureControls : []
+  const vis = {}
+
+  // (A) default visible unless DISABLE/secure
+  for (const c of controls) {
+    const id = c?.id
+    if (!id) continue
+    const disabled =
+      String(c?.settings?.general?.visibility || '').toUpperCase() === 'DISABLE'
+    vis[id] = !disabled && !secure.includes(id)
+  }
+
+  // (B) all controlled fields default to false
+  for (const parent of controls) {
+    const enableSettings = parent?.settings?.validation?.enableSettings || []
+    for (const setting of enableSettings) {
+      for (const targetId of setting?.controls || []) {
+        if (vis[targetId] !== false) vis[targetId] = false
+      }
+    }
+  }
+
+  // (C) evaluate enableSettings
+  for (const parent of controls) {
+    const enableSettings = parent?.settings?.validation?.enableSettings || []
+    const parentVal = values?.[parent.id]
+
+    for (const setting of enableSettings) {
+      const targets = setting?.controls || []
+      if (!targets.length) continue
+
+      const matchesValue =
+        parentVal == setting.value ||
+        (Array.isArray(parentVal) && parentVal.includes(setting.value))
+      if (!matchesValue) continue
+
+      const conditions = setting?.conditions || []
+      let ok = true
+
+      if (Array.isArray(conditions) && conditions.length) {
+        const mode = String(setting.groupLogic || 'ALL').toUpperCase() // ALL / ANY
+
+        const evalCond = (cond) => {
+          const v = values?.[cond.name]
+          switch (cond.logic) {
+            case 'IS_EQUALS_TO':
+              return v == cond.value
+            case 'IS_NOT_EQUALS_TO':
+              return v != cond.value
+            case 'IS_GREATER_THAN':
+              return v > cond.value
+            case 'IS_GREATER_THAN_OR_EQUALS_TO':
+              return v >= cond.value
+            case 'IS_LESSER_THAN':
+              return v < cond.value
+            case 'IS_LESSER_THAN_OR_EQUALS_TO':
+              return v <= cond.value
+            case 'IS_EMPTY':
+              return v === '' || v == null
+            case 'IS_NOT_EMPTY':
+              return !(v === '' || v == null)
+            default:
+              return false
+          }
+        }
+
+        ok = mode === 'ANY' ? conditions.some(evalCond) : conditions.every(evalCond)
+      }
+
+      if (!ok) continue
+
+      for (const id of targets) {
+        if (!secure.includes(id)) vis[id] = true
+      }
+    }
+  }
+
+  return vis
 }
 
 function isReadOnly(field) {
@@ -618,12 +699,155 @@ export default function ApplicationFormPage() {
   const [animDirection, setAnimDirection] = useState(0)
   const [stepErrors, setStepErrors] = useState({})
 
+  const [secureControls, setSecureControls] = useState([])
+  const parentComponentChangeEvents = useRef({})
+
   // Dropdown options cache: key -> { status, options, error }
   const [dropdownState, setDropdownState] = useState({})
 
   const setDropdown = useCallback((key, next) => {
     setDropdownState((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), ...next } }))
   }, [])
+
+  const allControls = useMemo(() => {
+    const out = []
+    for (const f of allFields) {
+      out.push(f)
+      if (String(f?.type || '').toUpperCase() === 'TABLE') {
+        const cols = f?.settings?.specific?.tableColumns
+        if (Array.isArray(cols)) out.push(...cols)
+      }
+    }
+    return out
+  }, [allFields])
+
+  useEffect(() => {
+    // Optional: hide secure controls if workflow session includes them
+    try {
+      const raw =
+        sessionStorage.getItem('workflowSession') ||
+        sessionStorage.getItem('workflowDetails') ||
+        sessionStorage.getItem('workflow')
+      const obj = raw ? JSON.parse(raw) : null
+      const list =
+        obj?.secureControls ||
+        obj?.formSecureControls ||
+        obj?.workflowSession?.secureControls ||
+        obj?.workflowSession?.formSecureControls ||
+        []
+      setSecureControls(Array.isArray(list) ? list : [])
+    } catch {
+      setSecureControls([])
+    }
+  }, [])
+
+  useEffect(() => {
+    // Build parent->children change events (for cascading dropdowns/resets)
+    const map = {}
+    for (const field of allControls) {
+      const specific = field?.settings?.specific || {}
+      const parentId =
+        specific.masterFormParentColumn ||
+        specific.repositoryFieldParent ||
+        specific.parentDateField ||
+        specific.parentOptionField
+      if (!parentId) continue
+      if (!map[parentId]) map[parentId] = []
+      if (!map[parentId].includes(field.id)) map[parentId].push(field.id)
+    }
+    parentComponentChangeEvents.current = map
+  }, [allControls])
+
+  const visibilityMap = useMemo(() => {
+    return computeVisibilityMap({
+      controls: allControls,
+      values: valuesById,
+      secureControls,
+    })
+  }, [allControls, valuesById, secureControls])
+
+  const clearDropdownCacheForField = useCallback((fieldId) => {
+    setDropdownState((prev) => {
+      const prefix = `${fieldId}::`
+      const keys = Object.keys(prev)
+      let changed = false
+      const next = { ...prev }
+      for (const k of keys) {
+        if (k === fieldId || k.startsWith(prefix)) {
+          delete next[k]
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [])
+
+  const setFieldValue = useCallback(
+    (fieldId, nextValue) => {
+      setValuesById((prev) => {
+        const next = { ...prev, [fieldId]: nextValue }
+
+        // Reset children when a parent changes (cascading dropdowns)
+        const reset = (parentId) => {
+          const children = parentComponentChangeEvents.current?.[parentId] || []
+          for (const childId of children) {
+            if (Object.prototype.hasOwnProperty.call(next, childId)) delete next[childId]
+            clearDropdownCacheForField(childId)
+            reset(childId)
+          }
+        }
+        reset(fieldId)
+
+        // Clear values for hidden controls immediately
+        const vis = computeVisibilityMap({
+          controls: allControls,
+          values: next,
+          secureControls,
+        })
+        for (const id of Object.keys(next)) {
+          if (vis[id] === false) {
+            delete next[id]
+            clearDropdownCacheForField(id)
+          }
+        }
+
+        return next
+      })
+    },
+    [allControls, secureControls, clearDropdownCacheForField],
+  )
+
+  // Safety net: if values are updated outside setFieldValue (defaults/inbox), prune hidden values
+  useEffect(() => {
+    const hiddenIds = Object.keys(valuesById).filter((id) => visibilityMap[id] === false)
+    if (hiddenIds.length === 0) return
+
+    setValuesById((prev) => {
+      const next = { ...prev }
+      let changed = false
+      for (const id of hiddenIds) {
+        if (Object.prototype.hasOwnProperty.call(next, id)) {
+          delete next[id]
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+
+    setStepErrors((prev) => {
+      const next = { ...prev }
+      let changed = false
+      for (const id of hiddenIds) {
+        if (Object.prototype.hasOwnProperty.call(next, id)) {
+          delete next[id]
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+
+    hiddenIds.forEach(clearDropdownCacheForField)
+  }, [valuesById, visibilityMap, clearDropdownCacheForField])
 
   const mainEmailFieldId = useMemo(() => {
     const emailFields = allFields.filter(
@@ -666,10 +890,18 @@ export default function ApplicationFormPage() {
           if (t.includes('postal') && postal && !next[f.id]) next[f.id] = postal
         }
 
+        const vis = computeVisibilityMap({
+          controls: allControls,
+          values: next,
+          secureControls,
+        })
+        for (const id of Object.keys(next)) {
+          if (vis[id] === false) delete next[id]
+        }
         return next
       })
     },
-    [allFields],
+    [allFields, allControls, secureControls],
   )
 
   const loadDropdownOptions = useCallback(
@@ -752,27 +984,18 @@ export default function ApplicationFormPage() {
     [dropdownState, setDropdown],
   )
 
-  // Visibility: mimic your enableSettings -> controls logic
-  const visibleFormControl = useCallback((fieldId, values) => {
-    let decided
-    for (const f of allFields) {
-      const enableSettings = f?.settings?.validation?.enableSettings || []
-      enableSettings.forEach((setting) => {
-        const controls = setting?.controls || []
-        if (!controls.includes(fieldId)) return
-        const expected = setting.value
-        const val = values[f.id]
-        const match = Array.isArray(val) ? val?.includes?.(expected) : val == expected
-        if (match) decided = true
-        else if (decided !== true) decided = false
-      })
-    }
-    if (decided !== undefined) return decided
-
-    const componentData = getFieldById(fieldId)
-    if (String(componentData?.settings?.general?.visibility || '').toUpperCase() === 'DISABLE') return false
-    return true
-  }, [allFields, getFieldById])
+  const visibleFormControl = useCallback(
+    (fieldId) => {
+      if (visibilityMap && Object.prototype.hasOwnProperty.call(visibilityMap, fieldId)) {
+        return visibilityMap[fieldId] !== false
+      }
+      const componentData = getFieldById(fieldId)
+      if (String(componentData?.settings?.general?.visibility || '').toUpperCase() === 'DISABLE') return false
+      if (Array.isArray(secureControls) && secureControls.includes(fieldId)) return false
+      return true
+    },
+    [visibilityMap, getFieldById, secureControls],
+  )
 
   // Mandatory: base fieldRule + mandatorySettings conditions
   const isMandatoryField = (fieldId, values) => {
@@ -792,7 +1015,7 @@ export default function ApplicationFormPage() {
       })
     }
 
-    if (!visibleFormControl(fieldId, values)) return false
+    if (!visibleFormControl(fieldId)) return false
     return required
   }
 
@@ -853,9 +1076,9 @@ export default function ApplicationFormPage() {
   const visiblePanels = useMemo(() => {
     return panels.filter((panel) => {
       const panelFields = Array.isArray(panel.fields) ? panel.fields : []
-      return panelFields.some((f) => visibleFormControl(f.id, valuesById))
+      return panelFields.some((f) => visibleFormControl(f.id))
     })
-  }, [panels, valuesById, visibleFormControl])
+  }, [panels, visibleFormControl])
 
   const currentPanel = visiblePanels[currentStep] ?? visiblePanels[0]
 
@@ -864,7 +1087,7 @@ export default function ApplicationFormPage() {
     const panelFields = Array.isArray(currentPanel.fields) ? currentPanel.fields : []
     const errors = {}
     panelFields.forEach((field) => {
-      if (!visibleFormControl(field.id, valuesById)) return
+      if (!visibleFormControl(field.id)) return
       if (!isMandatoryField(field.id, valuesById)) return
       const v = valuesById[field.id]
       const empty =
@@ -991,7 +1214,7 @@ export default function ApplicationFormPage() {
             >
               <div className="grid grid-cols-1 gap-6 sm:grid-cols-12">
                 {(Array.isArray(currentPanel.fields) ? currentPanel.fields : []).map((field) => {
-                  if (!visibleFormControl(field.id, valuesById)) return null
+                  if (!visibleFormControl(field.id)) return null
 
                   const required = isMandatoryField(field.id, valuesById)
                   const col = getColSpanClass(field)
@@ -1026,7 +1249,7 @@ export default function ApplicationFormPage() {
                           tableField={field}
                           childrenFields={childrenFields}
                           value={valuesById[field.id]}
-                          onChange={(v) => setValuesById((p) => ({ ...p, [field.id]: v }))}
+                          onChange={(v) => setFieldValue(field.id, v)}
                           required={required}
                         />
                       </div>
@@ -1038,7 +1261,7 @@ export default function ApplicationFormPage() {
                       <FieldRenderer
                         field={field}
                         value={valuesById[field.id]}
-                        onChange={(v) => setValuesById((p) => ({ ...p, [field.id]: v }))}
+                        onChange={(v) => setFieldValue(field.id, v)}
                         required={required}
                         hideLabel={false}
                         error={stepErrors[field.id]}
@@ -1069,7 +1292,11 @@ export default function ApplicationFormPage() {
               <div className="flex gap-3">
                 <button
                   type="button"
-                  onClick={() => setValuesById({})}
+                  onClick={() => {
+                    setValuesById({})
+                    setStepErrors({})
+                    setDropdownState({})
+                  }}
                   className="rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"
                 >
                   Reset
