@@ -7,6 +7,7 @@ import SearchableSelect from '../components/form/SearchableSelect'
 import LookupTextInput from '../components/form/LookupTextInput'
 import EmailInviteInput from '../components/form/EmailInviteInput'
 import JsonPhoneInput from '../components/form/JsonPhoneInput'
+import CurrencyAmountInput from '../components/form/CurrencyAmountInput'
 import LoadingPage from '../components/LoadingPage'
 import {
   getUniqueColumnValues,
@@ -481,12 +482,14 @@ function FieldRenderer({
       ) : type === 'NUMBER' ? (
         <InputBase type="number" inputMode="numeric" step="1" {...common} />
       ) : type === 'CURRENCY_AMOUNT' || type === 'CURRENCY' ? (
-        <div className="relative">
-          <div className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
-            $
-          </div>
-          <InputBase className="pl-8" type="number" inputMode="decimal" step="0.01" {...common} placeholder="0.00" />
-        </div>
+        <CurrencyAmountInput
+          field={field}
+          value={value ?? ''}
+          onChange={(v) => onChange(v)}
+          disabled={disabled}
+          required={required}
+          onValidationError={(msg) => setLocalError(msg || '')}
+        />
       ) : type === 'URL' ? (
         <InputBase type="url" inputMode="url" {...common} placeholder="https://..." />
       ) : type === 'SINGLE_SELECT' || type === 'MULTI_SELECT' ? (
@@ -1078,7 +1081,22 @@ export default function ApplicationFormPage() {
     if (specific.customDefaultValue != null && specific.customDefaultValue !== '') {
       const type = String(field?.type || '').toUpperCase()
       if (type === 'PHONE_NUMBER') return ''
-      if (type === 'CURRENCY_AMOUNT') return ''
+      if (type === 'CURRENCY_AMOUNT' || type === 'CURRENCY') {
+        // Support either your object-shaped default or a plain string default
+        if (typeof specific.customDefaultValue === 'object') {
+          const def = specific.customDefaultValue
+          const payload = {
+            code: String(def?.code || '').toUpperCase(),
+            symbol: String(def?.symbol || ''),
+            currency: String(def?.currency || def?.value || ''),
+            cName: String(def?.cName || def?.label || ''),
+            flag: String(def?.flag || ''),
+            value: '',
+          }
+          return JSON.stringify(payload)
+        }
+        return ''
+      }
       return specific.customDefaultValue?.toString?.() ?? String(specific.customDefaultValue)
     }
 
